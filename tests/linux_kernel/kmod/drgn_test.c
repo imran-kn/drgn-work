@@ -22,6 +22,7 @@
 #include <linux/rbtree_augmented.h>
 #include <linux/slab.h>
 #include <linux/version.h>
+#include <linux/err.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)
 #define HAVE_XARRAY 1
 #include <linux/xarray.h>
@@ -739,6 +740,68 @@ static void drgn_test_xarray_exit(void)
 #endif
 }
 
+// idr
+
+DEFINE_IDR(drgn_test_idr_empty);
+DEFINE_IDR(drgn_test_idr_one);
+DEFINE_IDR(drgn_test_idr_one_at_zero);
+DEFINE_IDR(drgn_test_idr_sparse);
+DEFINE_IDR(drgn_test_idr_dense);
+static unsigned long drgn_test_idr_ptrs[5] = {0x12121212, 0x34343434,
+					      0x5656565656565656,
+				              0x1234567812345678,
+					      0x1234567890abcdef};
+static int drgn_test_idr_init(void)
+{
+	int ret, i;
+
+	ret = idr_alloc(&drgn_test_idr_one, (void *)0xdeadb00, 66, 67,
+				GFP_KERNEL);
+	if (ret != 66)
+		return -ENOSPC;
+
+	ret = idr_alloc(&drgn_test_idr_one_at_zero, (void *)0x1234, 0, 1,
+				GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	ret = idr_alloc(&drgn_test_idr_sparse, (void *)0x1234, 1, 2,
+				GFP_KERNEL);
+	if (ret != 1)
+		return -ENOSPC;
+
+	ret = idr_alloc(&drgn_test_idr_sparse, (void *)0x5678, 0x80,
+				0x81, GFP_KERNEL);
+	if (ret != 0x80)
+		return -ENOSPC;
+
+	ret = idr_alloc(&drgn_test_idr_sparse, (void *)0x9abc, 0xee,
+				0xef, GFP_KERNEL);
+	if (ret != 0xee)
+		return -ENOSPC;
+
+	for (i = 10; i < 15; i++) {
+		ret = idr_alloc(&drgn_test_idr_dense, (void *)drgn_test_idr_ptrs[i - 10],
+				i, i + 1, GFP_KERNEL);
+		if (ret != i)
+			return -ENOSPC;
+	}
+
+	return 0;
+}
+
+static void drgn_test_idr_exit(void)
+{
+	int i;
+	idr_remove(&drgn_test_idr_one, 66);
+	idr_remove(&drgn_test_idr_one_at_zero, 0);
+	idr_remove(&drgn_test_idr_sparse, 1);
+	idr_remove(&drgn_test_idr_sparse, 0x80);
+	idr_remove(&drgn_test_idr_sparse, 0xee);
+	for (i = 10; i < 15; i++)
+		idr_remove(&drgn_test_idr_dense, i);
+}
+
 // Dummy function symbol.
 int drgn_test_function(int x)
 {
@@ -753,6 +816,7 @@ static void drgn_test_exit(void)
 	drgn_test_stack_trace_exit();
 	drgn_test_radix_tree_exit();
 	drgn_test_xarray_exit();
+	drgn_test_idr_exit();
 }
 
 static int __init drgn_test_init(void)
@@ -778,6 +842,9 @@ static int __init drgn_test_init(void)
 	if (ret)
 		goto out;
 	ret = drgn_test_xarray_init();
+	if (ret)
+		goto out;
+	ret = drgn_test_idr_init();
 out:
 	if (ret)
 		drgn_test_exit();
