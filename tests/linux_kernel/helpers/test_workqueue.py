@@ -1,18 +1,24 @@
 # Copyright (c) 2022, Oracle and/or its affiliates.
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-from drgn.helpers.linux.idr import idr_for_each
-from drgn.helpers.linux.list import list_for_each_entry
-from drgn.helpers.linux.percpu import per_cpu
+from drgn.helpers.linux.cpumask import for_each_online_cpu
+from drgn.helpers.linux.percpu import per_cpu, per_cpu_ptr
 from drgn.helpers.linux.pid import for_each_task
-
 from drgn.helpers.linux.workqueue import (
+    find_worker_executing_work,
     find_workqueue,
     for_each_cpu_worker_pool,
+    for_each_pending_work,
+    for_each_pending_work_in_pool,
+    for_each_pending_work_of_pwq,
+    for_each_pending_work_on_cpu,
     for_each_pool,
     for_each_pool_worker,
+    for_each_pwq,
     for_each_worker,
     for_each_workqueue,
+    get_work_pool,
+    get_work_pwq,
 )
 from tests.linux_kernel import LinuxKernelTestCase
 
@@ -80,3 +86,65 @@ class TestWorkqueue(LinuxKernelTestCase):
         for name in workqueue_names:
             workqueue = find_workqueue(self.prog, name)
             self.assertEqual(name, workqueue.name.string_())
+
+    def test_for_each_pwq(self):
+        wq = find_workqueue(self.prog, "drgn_test_wq")
+        # Since "drgn_test_wq" is a bound workqueue, list pwqs
+        # should contain only per-cpu pwqs i.e cpu_pwqs
+        pwqs = [pwq.value_() for pwq in for_each_pwq(wq)]
+        cpu_pwqs = [
+            per_cpu_ptr(wq.cpu_pwqs, cpu).value_()
+            for cpu in for_each_online_cpu(self.prog)
+        ]
+        self.assertEqual(pwqs.sort(), cpu_pwqs.sort())
+
+    def test_for_each_pending_work(self):
+        all_works = [work.value_() for work in for_each_pending_work(self.prog)]
+        test_works = [self.prog["drgn_test_works"][i].address_ for i in range(5)]
+        self.assertGreaterEqual(all_works, test_works)
+
+    def test_for_each_pending_work_on_cpu(self):
+        all_works = [
+            work.value_() for work in for_each_pending_work_on_cpu(self.prog, 0)
+        ]
+        test_works = [self.prog["drgn_test_works"][i].address_ for i in range(5)]
+        self.assertGreaterEqual(all_works, test_works)
+
+    def test_for_each_pending_work_in_pool(self):
+        pool = per_cpu(self.prog["cpu_worker_pools"], 0)[0].address_of_()
+        all_works_in_pool = [
+            work.value_() for work in for_each_pending_work_in_pool(pool)
+        ]
+        test_works = [self.prog["drgn_test_works"][i].address_ for i in range(5)]
+        self.assertGreaterEqual(all_works_in_pool, test_works)
+
+    def test_for_each_pending_work_of_pwq(self):
+        wq = find_workqueue(self.prog, "drgn_test_wq")
+        cpu_pwqs_0 = per_cpu_ptr(wq.cpu_pwqs, 0)
+        all_works_of_pwq = [
+            work.value_() for work in for_each_pending_work_of_pwq(cpu_pwqs_0)
+        ]
+        test_works = [self.prog["drgn_test_works"][i].address_ for i in range(5)]
+        self.assertEqual(all_works_of_pwq, test_works)
+
+    def test_get_work_pwq(self):
+        wq = find_workqueue(self.prog, "drgn_test_wq")
+        cpu_pwqs_0 = per_cpu_ptr(wq.cpu_pwqs, 0)
+        cpu_pwqs_1 = per_cpu_ptr(wq.cpu_pwqs, 1)
+        work = self.prog["drgn_test_works"][0].address_of_()
+        pwq = get_work_pwq(work)
+        self.assertEqual(pwq, cpu_pwqs_0)
+        self.assertNotEqual(pwq, cpu_pwqs_1)
+
+    def test_get_work_pool(self):
+        work = self.prog["drgn_test_works"][0].address_of_()
+        pool = get_work_pool(work)
+        pool_0 = per_cpu(self.prog["cpu_worker_pools"], 0)[0].address_of_()
+        pool_1 = per_cpu(self.prog["cpu_worker_pools"], 1)[0].address_of_()
+        self.assertEqual(pool, pool_0)
+        self.assertNotEqual(pool, pool_1)
+
+    def test_find_worker_executing_work(self):
+        blocker_work = self.prog["drgn_test_blocker_work"].address_of_()
+        worker = find_worker_executing_work(blocker_work)
+        self.assertEqual(worker.current_work, blocker_work)

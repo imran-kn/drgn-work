@@ -21,6 +21,8 @@
 #include <linux/rbtree.h>
 #include <linux/rbtree_augmented.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
+#include <linux/delay.h>
 #include <linux/version.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)
 #define HAVE_XARRAY 1
@@ -801,6 +803,71 @@ static void drgn_test_idr_exit(void)
 	idr_destroy(&drgn_test_idr_dense);
 }
 
+// workqeue
+
+struct workqueue_struct *drgn_test_wq;
+struct work_struct drgn_test_works[5];
+struct work_struct drgn_test_blocker_work;
+
+int drgn_test_loop_in_work_handler = 1;
+module_param(drgn_test_loop_in_work_handler, int, 0660);
+
+static void drgn_test_work_func(struct work_struct *data)
+{
+	(void)data;
+	mdelay(10); //just busy loop for 10ms
+	return;
+}
+
+static void drgn_test_blocker_work_func(struct work_struct *data)
+{
+	int i;
+	(void)data;
+
+	/*
+	 * The test function loops for 60 sec max. It is expected
+	 * that within this duration all pending work related tests
+	 * would be done.
+	 * mdelay will keep busy looping so workqueue framework should
+	 * not fork new workers for involved pool.
+	 */
+	for (i = 0; i < 3000; i++) {
+		if (!drgn_test_loop_in_work_handler)
+			break;
+		mdelay(20);
+		cond_resched();
+	}
+}
+
+static int __init drgn_test_workqueue_init(void)
+{
+	int ret, i;
+
+	drgn_test_wq = alloc_workqueue("drgn_test_wq", 0, 0);
+	if (!drgn_test_wq)
+		return -ENOMEM;
+
+	INIT_WORK(&drgn_test_blocker_work, drgn_test_blocker_work_func);
+
+	for (i = 0; i < 5; i++)
+		INIT_WORK(&drgn_test_works[i], drgn_test_work_func);
+
+	ret = queue_work_on(0, drgn_test_wq, &drgn_test_blocker_work);
+
+	for (i = 0; i < 5; i++)
+		ret = queue_work_on(0, drgn_test_wq, &drgn_test_works[i]);
+
+	if (!ret) //destroy workqueue if any work submission failed
+		destroy_workqueue(drgn_test_wq);
+
+        return 0;
+}
+
+static void drgn_test_workqueue_exit(void)
+{
+	destroy_workqueue(drgn_test_wq);
+}
+
 // Dummy function symbol.
 int drgn_test_function(int x)
 {
@@ -816,6 +883,7 @@ static void drgn_test_exit(void)
 	drgn_test_radix_tree_exit();
 	drgn_test_xarray_exit();
 	drgn_test_idr_exit();
+	drgn_test_workqueue_exit();
 }
 
 static int __init drgn_test_init(void)
@@ -844,6 +912,9 @@ static int __init drgn_test_init(void)
 	if (ret)
 		goto out;
 	ret = drgn_test_idr_init();
+	if (ret)
+		goto out;
+	ret = drgn_test_workqueue_init();
 out:
 	if (ret)
 		drgn_test_exit();
